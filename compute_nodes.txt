@@ -1,5 +1,5 @@
-login02.cselabs.umn.edu, 9000
-login02.cselabs.umn.edu, 9001
-login02.cselabs.umn.edu, 9002
-login02.cselabs.umn.edu, 9003
-login07.cselabs.umn.edu, 9004
+127.0.0.1,9000
+127.0.0.1,9001
+127.0.0.1,9002
+127.0.0.1,9003
+127.0.0.1,9004

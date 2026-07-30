@@ -1,11 +1,10 @@
 import sys
-import glob
 import os
+import time
 import threading
 import hashlib
 
 sys.path.append('gen-py')
-sys.path.insert(0, glob.glob('../thrift-0.19.0/lib/py/build/lib*')[0])
 
 import thrift
 from thrift.transport import TSocket
@@ -17,17 +16,19 @@ from compute import compute
 from compute.ttypes import node, weights
 from supernode import supernode
 from ML import ML
+from config import RING_SIZE, FINGER_TABLE_SIZE, NUM_CLASSES, HIDDEN_UNITS, LEARNING_RATE, TRAIN_EPOCHS, MOMENTUM
 
-MAX_NODES = 10
-M = 4  #4 bits for hash table index
-FINGER_TABLE_SIZE = M
+# number of times a node retries join_network when the supernode reports it is
+# busy admitting another node (joins are serialized by the supernode)
+JOIN_MAX_RETRIES = 15
+JOIN_RETRY_DELAY = 2  # seconds
 
 # consistent hashing function used in the system
 def hash_to_number(input_string):
     sha1_hash = hashlib.sha1(input_string.encode()).hexdigest()
     hash_int = int(sha1_hash, 16)
-    
-    return hash_int % MAX_NODES
+
+    return hash_int % RING_SIZE
 
 class ComputeHandler:
     def __init__(self, port, super_ip, super_port):
@@ -78,7 +79,18 @@ class ComputeHandler:
             
             print("🔄 Requesting to join the network...")
             self.node_id = supernode_client.request_join(self.port)
-            
+
+            # The supernode admits nodes one at a time and returns -1 while it is
+            # busy finishing another node's join. Back off and retry so that
+            # nodes started concurrently (e.g. under docker compose) settle in
+            # instead of giving up immediately.
+            retries = 0
+            while self.node_id == -1 and retries < JOIN_MAX_RETRIES:
+                retries += 1
+                print(f"⏳ Supernode busy, retrying join ({retries}/{JOIN_MAX_RETRIES})...")
+                time.sleep(JOIN_RETRY_DELAY)
+                self.node_id = supernode_client.request_join(self.port)
+
             if self.node_id == -1:
                 print("❌ Failed to join: network is busy or full")
                 transport.close()
@@ -95,7 +107,7 @@ class ComputeHandler:
                 self.successor = node(self.ip, self.port, self.node_id)
                 
                 for i in range(FINGER_TABLE_SIZE):
-                    self.finger_table[i] = {"start": (self.node_id + 2**i) % MAX_NODES, 
+                    self.finger_table[i] = {"start": (self.node_id + 2**i) % RING_SIZE, 
                                             "successor_id": self.node_id, 
                                             "node": node(self.ip, self.port, self.node_id)}
                 success = supernode_client.confirm_join()
@@ -229,9 +241,10 @@ class ComputeHandler:
         # base case
         if self._is_between(hash, self.predecessor.id, self.node_id):
             model = ML.mlp()
-            if model.init_training_random(filename, 26, 20):
+            if model.init_training_random(filename, NUM_CLASSES, HIDDEN_UNITS):
+                model.set_momentum(MOMENTUM)
                 print(f"file training at node {self.node_id}")
-                t_err = model.train(0.0001, 250)
+                t_err = model.train(LEARNING_RATE, TRAIN_EPOCHS)
             v, w = model.get_weights()
             curr_weights = weights(w, v, 0)
             with self.model_lock:
@@ -328,7 +341,7 @@ class ComputeHandler:
                 
                 transport.open()
                 
-                self.finger_table[0]["start"] = (self.node_id + 1) % MAX_NODES
+                self.finger_table[0]["start"] = (self.node_id + 1) % RING_SIZE
                 successor = node_client.find_successor(self.node_id)
                 self.finger_table[0]["successor_id"] = successor.id
                 self.finger_table[0]["node"] = successor
@@ -353,8 +366,8 @@ class ComputeHandler:
                 
                 # fill the rest of the finger table
                 for i in range(1, FINGER_TABLE_SIZE):
-                    self.finger_table[i]["start"] = (self.node_id + 2**i) % MAX_NODES
-                    current_succ = node_client.find_successor((self.node_id + 2**i) % MAX_NODES)
+                    self.finger_table[i]["start"] = (self.node_id + 2**i) % RING_SIZE
+                    current_succ = node_client.find_successor((self.node_id + 2**i) % RING_SIZE)
                     if self.incorrect_entry_ft(self.node_id, self.finger_table[i]["start"], current_succ.id):
                         self.finger_table[i]["successor_id"] = self.node_id
                         self.finger_table[i]["node"] = node(self.ip, self.port, self.node_id)

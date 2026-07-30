@@ -216,15 +216,18 @@ class mlp:
         _n, _d = np.shape(_X)
 
         _X = np.append(np.ones((_n, 1)), _X, axis=1)
-        Z = [[ReLU(val) for val in row] for row in np.dot(_X, self.W)]
+        # hidden layer with ReLU activation (vectorized: equivalent to the
+        # per-element ReLU but done in one numpy op)
+        Z = np.maximum(np.dot(_X, self.W), 0)
         self.Z = np.append(np.ones((_n, 1)), Z, axis=1)
 
+        # output layer with softmax (vectorized). Subtracting the per-row max
+        # is a numerically-stable, mathematically-identical form of
+        # exp(O_i) / sum_j exp(O_j).
         O = np.dot(self.Z, self.V)
-
-        self.Y = np.zeros((_n, self.k))
-        for t in range(_n):
-            for i in range(self.k):
-                self.Y[t,i] = 1/np.sum(np.exp(O[t,:] - O[t,i]))
+        O = O - np.max(O, axis=1, keepdims=True)
+        expO = np.exp(O)
+        self.Y = expO / np.sum(expO, axis=1, keepdims=True)
     
 
     # backwards propogate, Return dV and dW
@@ -234,14 +237,19 @@ class mlp:
             R[:,k] = (self.labels == k)
 
         X = np.append(np.ones((self.n, 1)), self.X, axis=1)
-        dV = eta * np.transpose((np.dot(np.transpose((R - self.Y)), self.Z)))
-        
+        # Gradients are averaged over the n samples (the 1/n factor) so that a
+        # stable learning rate does not depend on the shard size. Previously the
+        # gradient was a raw sum over all samples, which made the effective step
+        # ~n x larger and forced an impractically tiny eta.
+        dV = eta * np.transpose((np.dot(np.transpose((R - self.Y)), self.Z))) / self.n
+
         # dW = eta*(((R - Y_pred)*V(2:end,:)' .* (X*W >= 0))'*X)';
-        XW = [[val >= 0 for val in row] for row in np.dot(X, self.W)]
+        # (X*W >= 0) is the ReLU gradient mask, vectorized
+        XW = (np.dot(X, self.W) >= 0)
         # Vt = np.transpose(self.V[1:,:])
         Vt = np.transpose(np.delete(self.V, 0, 0))
         dW = np.transpose(np.multiply(np.dot((R-self.Y),Vt), XW))
-        dW = eta * np.transpose(np.dot(dW,X))
+        dW = eta * np.transpose(np.dot(dW,X)) / self.n
 
         return dV, dW
 
@@ -268,7 +276,7 @@ class mlp:
 # ReLU activation function
 def ReLU(x):
     if 0 > x:
-        return x
+        return 0
     return x
 
 

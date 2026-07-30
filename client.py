@@ -1,10 +1,8 @@
 import sys
-import glob
 import os
 import time
 
 sys.path.append('gen-py')
-sys.path.insert(0, glob.glob('../thrift-0.19.0/lib/py/build/lib*')[0])
 
 from thrift import Thrift
 from thrift.transport import TSocket
@@ -16,6 +14,7 @@ from compute import compute
 from compute.ttypes import node, weights
 from supernode import supernode
 from ML import ML
+from config import NUM_CLASSES, HIDDEN_UNITS
 
 # populate files
 def get_files_in_directory(directory_path):
@@ -24,8 +23,9 @@ def get_files_in_directory(directory_path):
     for root, dirs, files in os.walk(directory_path):
         for file in files:
             file_paths.append(os.path.join(root, file))
-    
-    return file_paths
+
+    # sort for a deterministic shard set
+    return sorted(file_paths)
 
 def main():
     
@@ -46,7 +46,7 @@ def main():
     if contact.id != -1:
         # initialize shared ML model
         mlp = ML.mlp()
-        mlp.init_training_random(training_files[0], 26, 20)
+        mlp.init_training_random(training_files[0], NUM_CLASSES, HIDDEN_UNITS)
         shared_v, shared_w = mlp.get_weights()
         shared_v = ML.scale_matricies(shared_v, 0)
         shared_w = ML.scale_matricies(shared_w, 0)
@@ -61,9 +61,10 @@ def main():
         # send out all training files
         for file in training_files:
             node_client.put_data(file)
-        # sleep for a bit to wait for training
+        # give the nodes a head start on training; any models not ready yet are
+        # picked up by the status==1 polling loop below
         print("Done providing data, sleeping to let the models train")
-        time.sleep(90)
+        time.sleep(30)
         # acquire and aggregate each model
         for file in training_files:
             model = node_client.get_model(file)

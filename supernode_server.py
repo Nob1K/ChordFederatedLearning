@@ -1,7 +1,5 @@
 import sys
-import glob
 sys.path.append('gen-py')
-sys.path.insert(0, glob.glob('../thrift-0.19.0/lib/py/build/lib*')[0])
 
 from thrift import Thrift
 from thrift.transport import TSocket
@@ -15,14 +13,15 @@ from threading import Lock
 import random
 import threading
 
-MAX_NODES = 10
+from config import RING_SIZE, MAX_NODES
 
 # lock for things below
 global_lock = Lock()
 busy = False
 online_nodes = {} # key is node_id, val is node(custom ds)
 node_map = {} # key is port, val is ip
-numbers = random.sample(range(10), 10)
+# distinct node IDs drawn from the Chord identifier space [0, RING_SIZE)
+numbers = random.sample(range(RING_SIZE), MAX_NODES)
 next_index = 0
 
 class SupernodeHandler:
