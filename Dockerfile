@@ -13,6 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # generate gen-py inside the image
-RUN thrift --gen py compute.thrift && thrift --gen py supernode.thrift
+RUN thrift --gen py compute.thrift
 
 ENV PYTHONUNBUFFERED=1

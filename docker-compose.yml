@@ -1,51 +1,41 @@
-# Spins up a full Chord cluster:
-#   1 supernode + 3 compute nodes + 1 client
+# Spins up a Chord cluster:
+#   3 compute nodes + 1 client
 #
 #   docker compose up --build
 #
-# The client pushes the training shards into the ring, waits for local
-# training, aggregates the models with FedAvg, and prints a validation error
+# compute0 forms the ring; compute1/compute2 join by bootstrapping through it.
+# The client pushes the training shards into the ring, waits for local training,
+# aggregates the models with FedAvg, and prints a validation error.
 
-
-
-# Shared build, node-registry mount. The registry maps each compute port to
-# the docker service name that hosts it, so nodes can reach each other by name.
 x-app: &app
   build: .
-  volumes:
-    - ./docker/compute_nodes.txt:/app/compute_nodes.txt:ro
   networks:
     - chord
 
 services:
-  supernode:
-    <<: *app
-    hostname: supernode
-    command: python supernode_server.py 8000
-
   compute0:
     <<: *app
     hostname: compute0
-    # small delay so the supernode is listening before we try to join;
-    # concurrent joins are additionally handled by retry-on-busy in the node.
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9000"
-    depends_on: [supernode]
+    # first node: no bootstrap peer, forms the ring alone
+    command: python compute_server.py compute0 9000
 
   compute1:
     <<: *app
     hostname: compute1
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9001"
-    depends_on: [supernode]
+    # small delay so compute0 is listening before we bootstrap through it
+    command: sh -c "sleep 4 && python compute_server.py compute1 9001 compute0 9000"
+    depends_on: [compute0]
 
   compute2:
     <<: *app
     hostname: compute2
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9002"
-    depends_on: [supernode]
+    command: sh -c "sleep 6 && python compute_server.py compute2 9002 compute0 9000"
+    depends_on: [compute0]
 
   client:
     <<: *app
-    command: sh -c "sleep 12 && python client.py supernode 8000"
+    # entry nodes are tried in order until one answers
+    command: sh -c "sleep 12 && python client.py compute0 9000 compute1 9001 compute2 9002"
     depends_on: [compute0, compute1, compute2]
 
 networks:

@@ -14,132 +14,90 @@ from thrift.server import TServer
 
 from compute import compute
 from compute.ttypes import node, weights
-from supernode import supernode
 from ML import ML
 from config import RING_SIZE, FINGER_TABLE_SIZE, NUM_CLASSES, HIDDEN_UNITS, LEARNING_RATE, TRAIN_EPOCHS, MOMENTUM
 
-# number of times a node retries join_network when the supernode reports it is
-# busy admitting another node (joins are serialized by the supernode)
-JOIN_MAX_RETRIES = 15
-JOIN_RETRY_DELAY = 2  # seconds
-
-# consistent hashing function used in the system
+# consistent hashing function used in the system: maps any string into the
+# Chord identifier space [0, RING_SIZE). Used both for node IDs (hash of
+# "host:port") and for data key (hash of a filename)
 def hash_to_number(input_string):
     sha1_hash = hashlib.sha1(input_string.encode()).hexdigest()
     hash_int = int(sha1_hash, 16)
 
     return hash_int % RING_SIZE
 
+# short, human-readable ID for log lines (the full IDs are large)
+def short_id(node_id):
+    return f"{node_id:04x}"
+
 class ComputeHandler:
-    def __init__(self, port, super_ip, super_port):
-        self.ip = self._load_compute_nodes()[port]
+    def __init__(self, host, port, bootstrap_host=None, bootstrap_port=None):
+        self.ip = host
         self.port = port
-        self.node_id = None
-        self.supernode_ip = super_ip
-        self.supernode_port = super_port
-        
+        # chord id obtained by hashing own addr
+        self.node_id = hash_to_number(f"{host}:{port}")
+        # bootstrap peer or None for first node in ring
+        self.bootstrap_host = bootstrap_host
+        self.bootstrap_port = bootstrap_port
+
         self.lock = threading.RLock()
         self.model_lock = threading.RLock()
-        
+
         self.predecessor = None
         self.successor = None
         self.finger_table = [{} for _ in range(FINGER_TABLE_SIZE)]
-        
+
         self.models = {}
         self.data_files = set()
-        
+
         self.join_network()
-        
-        print(f"✅ Compute node initialized with IP: {self.ip}, Port: {port}, ID: {self.node_id}")
+
+        print(f"Compute node initialized with IP: {self.ip}, Port: {port}, ID: {self.node_id} ({short_id(self.node_id)})")
         self.print_info()
 
-    
-    """load compute_nodes.txt to compare ports to acquire self.ip"""
-    def _load_compute_nodes(self):
-        node_map = {}
-        try:
-            with open('compute_nodes.txt', 'r') as f:
-                for line in f:
-                    ip, port = line.strip().split(',')
-                    node_map[int(port)] = ip
-        except FileNotFoundError:
-            raise RuntimeError("compute_nodes.txt not found")
-        return node_map
 
-
-    """join the Chord DHT network"""
+    """join the Chord DHT network via a bootstrap peer, or form a new ring."""
     def join_network(self):
         try:
-            transport = TSocket.TSocket(self.supernode_ip, self.supernode_port)
-            transport = TTransport.TBufferedTransport(transport)
-            protocol = TBinaryProtocol.TBinaryProtocol(transport)
-            supernode_client = supernode.Client(protocol)
-            
-            transport.open()
-            
-            print("🔄 Requesting to join the network...")
-            self.node_id = supernode_client.request_join(self.port)
+            self_node = node(self.ip, self.port, self.node_id)
 
-            # The supernode admits nodes one at a time and returns -1 while it is
-            # busy finishing another node's join. Back off and retry so that
-            # nodes started concurrently (e.g. under docker compose) settle in
-            # instead of giving up immediately.
-            retries = 0
-            while self.node_id == -1 and retries < JOIN_MAX_RETRIES:
-                retries += 1
-                print(f"⏳ Supernode busy, retrying join ({retries}/{JOIN_MAX_RETRIES})...")
-                time.sleep(JOIN_RETRY_DELAY)
-                self.node_id = supernode_client.request_join(self.port)
-
-            if self.node_id == -1:
-                print("❌ Failed to join: network is busy or full")
-                transport.close()
-                sys.exit(1)
-                
-            print(f"🔄 Received node ID: {self.node_id}")
-            
-            existing_node = supernode_client.get_node()
-            
-            # first node
-            if existing_node.port == 0:
-                print("🔄 First node in the network")
+            # first node and form a ring of one
+            if self.bootstrap_host is None:
+                print("First node in the network")
                 self.predecessor = None
-                self.successor = node(self.ip, self.port, self.node_id)
-                
+                self.successor = self_node
                 for i in range(FINGER_TABLE_SIZE):
-                    self.finger_table[i] = {"start": (self.node_id + 2**i) % RING_SIZE, 
-                                            "successor_id": self.node_id, 
-                                            "node": node(self.ip, self.port, self.node_id)}
-                success = supernode_client.confirm_join()
-            else:
-                print(f"🔄 Joining through existing node: {existing_node.ip}:{existing_node.port}")
-                # connect to the existing node
-                self._init_finger_table(existing_node)
-                succ_transport = TSocket.TSocket(self.successor.ip, self.successor.port)
-                succ_transport = TTransport.TBufferedTransport(succ_transport)
-                succ_protocol = TBinaryProtocol.TBinaryProtocol(succ_transport)
-                succ_client = compute.Client(succ_protocol)
-                succ_transport.open()
-                result = succ_client.fix_fingers(node(self.ip, self.port, self.node_id))
-                succ_transport.close()
+                    self.finger_table[i] = {"start": (self.node_id + 2**i) % RING_SIZE,
+                                            "successor_id": self.node_id,
+                                            "node": self_node}
+                print("Formed a new ring")
+                return
 
-                print("result:", result)
-                if result:
-                    success = supernode_client.confirm_join()
-                else:
-                    success = False
+            # bootstrap through a known peer
+            bootstrap_id = hash_to_number(f"{self.bootstrap_host}:{self.bootstrap_port}")
+            existing_node = node(self.bootstrap_host, self.bootstrap_port, bootstrap_id)
+            print(f"Joining through bootstrap peer {existing_node.ip}:{existing_node.port} "
+                  f"(ID {existing_node.id} / {short_id(existing_node.id)})")
 
-            if success:
-                print("✅ Successfully joined the network")
+            self._init_finger_table(existing_node)
+
+            # Propagate our arrival so existing nodes fix their finger tables.
+            succ_transport = TSocket.TSocket(self.successor.ip, self.successor.port)
+            succ_transport = TTransport.TBufferedTransport(succ_transport)
+            succ_protocol = TBinaryProtocol.TBinaryProtocol(succ_transport)
+            succ_client = compute.Client(succ_protocol)
+            succ_transport.open()
+            result = succ_client.fix_fingers(self_node)
+            succ_transport.close()
+
+            if result:
+                print("Successfully joined the network")
             else:
-                print("❌ Failed to confirm joining")
-                transport.close()
+                print("Failed to propagate join around the ring")
                 sys.exit(1)
-                
-            transport.close()
-            
+
         except Exception as e:
-            print(f"❌ Error joining network: {e}")
+            print(f"Error joining network: {e}")
             sys.exit(1)
 
     """find the successor node for a given ID."""
@@ -172,7 +130,7 @@ class ComputeHandler:
             return result
         
         except Exception as e:
-            print(f"❌ Error finding successor: {e}")
+            print(f"Error finding successor: {e}")
             return current  # Return self if there's an error
 
     """find the node preceding a given ID"""
@@ -203,7 +161,7 @@ class ComputeHandler:
             return result
                 
         except Exception as e:
-            print(f"❌ Error finding predecessor: {e}")
+            print(f"Error finding predecessor: {e}")
             return current
     
     
@@ -237,7 +195,7 @@ class ComputeHandler:
     """store and train a data file on the node responsible"""
     def put_data(self, filename):
         hash = hash_to_number(filename)
-        print(f"📥 Received put_data request for {filename}(hash: {hash}) at node: {self.node_id}")
+        print(f"Received put_data request for {filename}(hash: {hash}) at node: {self.node_id}")
         # base case
         if self._is_between(hash, self.predecessor.id, self.node_id):
             model = ML.mlp()
@@ -270,7 +228,7 @@ class ComputeHandler:
     """return a model weights for a given filename."""
     def get_model(self, filename):
         hash = hash_to_number(filename)
-        print(f"📤 Received get_model request for {filename} at node {self.node_id}, hash value: {hash}")
+        print(f"Received get_model request for {filename} at node {self.node_id}, hash value: {hash}")
         # base case
         if self._is_between(hash, self.predecessor.id, self.node_id):
             print(f"model resides at node {self.node_id}")
@@ -379,7 +337,7 @@ class ComputeHandler:
                 print("finger table initialized")
                 self.print_info()
             except Exception as e:
-                print(f"❌ Error initializing finger table: {e}")
+                print(f"Error initializing finger table: {e}")
                 raise
     
     """set a new predecessor if notified"""
@@ -398,7 +356,7 @@ class ComputeHandler:
                     if self.incorrect_entry_ft(new_id, current["start"], current["successor_id"]):
                         current["successor_id"] = new_id
                         current["node"] = node
-                        print(f"📝 Updated finger[{i}]'s successor to {new_id}")
+                        print(f"Updated finger[{i}]'s successor to {new_id}")
                         if i == 0:
                             self.successor = node
 
@@ -417,7 +375,7 @@ class ComputeHandler:
                 return result
                 
             except Exception as e:
-                print(f"❌ Error fixing finger tables: {e}")
+                print(f"Error fixing finger tables: {e}")
                 
     """helper for fix_fingers to determine if the current entry is subject to be fixed"""
     def incorrect_entry_ft(self, id, start1, start2):
@@ -428,24 +386,27 @@ class ComputeHandler:
 
 
 
-def start_server(port, super_ip, super_port):
+def start_server(host, port, bootstrap_host=None, bootstrap_port=None):
     """Start the Thrift server for this compute node."""
-    handler = ComputeHandler(port, super_ip, super_port)
+    handler = ComputeHandler(host, port, bootstrap_host, bootstrap_port)
     processor = compute.Processor(handler)
-    
+
     server_transport = TSocket.TServerSocket(port=port)
     tfactory = TTransport.TBufferedTransportFactory()
     pfactory = TBinaryProtocol.TBinaryProtocolFactory()
     server = TServer.TThreadedServer(processor, server_transport, tfactory, pfactory)
-    
-    print(f"🚀 Starting compute node server on port: {port}")
+
+    print(f"Starting compute node server on port: {port}")
     server.serve()
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("usage: python3 compute_server.py <supernode_ip> <supernode_port> <compute_port>")
+    # First node:   python3 compute_server.py <host> <port>
+    # Joining node: python3 compute_server.py <host> <port> <bootstrap_host> <bootstrap_port>
+    if len(sys.argv) < 3:
+        print("usage: python3 compute_server.py <host> <port> [bootstrap_host bootstrap_port]")
         sys.exit(1)
-    super_ip = sys.argv[1]
-    super_port = int(sys.argv[2])
-    compute_port = int(sys.argv[3])
-    start_server(compute_port, super_ip, super_port)
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+    bootstrap_host = sys.argv[3] if len(sys.argv) > 3 else None
+    bootstrap_port = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    start_server(host, port, bootstrap_host, bootstrap_port)

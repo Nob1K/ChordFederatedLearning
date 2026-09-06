@@ -3,7 +3,6 @@
 # Regenerate the Thrift RPC stubs into gen-py/ (requires the `thrift` compiler)
 gen:
 	thrift --gen py compute.thrift
-	thrift --gen py supernode.thrift
 
 # Create a local virtualenv, install deps, and generate stubs
 install:
