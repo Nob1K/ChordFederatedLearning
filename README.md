@@ -49,8 +49,10 @@ given on the command line (the first node forms the ring alone).
 1. **Naming.** Each compute node assigns itself an ID by hashing `host:port` into the identifier
    space `[0, RING_SIZE)` — no allocator. The large space (`2**16`) makes collisions negligible.
 2. **Join.** The first node forms the ring alone. A later node is told one existing peer on the
-   command line, initializes its finger table through it, fixes its successor/predecessor, and
-   propagates the new entry around the ring (`fix_fingers`).
+   command line and finds its immediate successor through it. A background maintenance loop on
+   every node (`stabilize` / `fix_fingers` / `check_predecessor`, running each second) then
+   converges the successor/predecessor pointers and finger tables — and repairs them when a node
+   joins or crashes. Each node keeps a list of backup successors so a crash doesn't break the ring.
 3. **Data placement.** A file name is hashed (SHA-1 → `mod RING_SIZE`). `put_data` routes the file to
    the node responsible for that key using the finger table, and that node trains an MLP on it.
 4. **Aggregation.** The client calls `get_model` for every shard (polling until training completes),

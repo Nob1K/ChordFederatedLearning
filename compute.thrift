@@ -13,10 +13,13 @@ struct weights {
 service compute {
     oneway void put_data(1:string filename),
     weights get_model(1:string filename),
-    bool fix_fingers(1: node new_node),
     void print_info(),
     node find_successor(1: i32 id),
-    node find_predecessor(1: i32 id),
-    void notify(1: node new_node)
-    node get_predecessor()
+    void notify(1: node new_node),
+    node get_predecessor(),
+    // stabilization
+    list<node> get_successor_list(),
+    void ping(),
+    // send a trained model to a backup node
+    oneway void replicate_model(1:string filename, 2:weights w)
 }
