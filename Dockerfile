@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Thrift compiler, used to generate the Python RPC stubs at build time
+# the thrift compiler is needed to generate the rpc stubs during the build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends thrift-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# generate gen-py inside the image
-RUN thrift --gen py compute.thrift && thrift --gen py supernode.thrift
+# generate the rpc stubs
+RUN thrift --gen py compute.thrift
 
 ENV PYTHONUNBUFFERED=1

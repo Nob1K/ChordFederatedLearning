@@ -12,3 +12,4 @@ gen-py/
 
 # Logs / local run artifacts
 *.log
+/docs

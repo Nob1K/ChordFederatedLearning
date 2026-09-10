@@ -1,52 +1,70 @@
-# Spins up a full Chord cluster:
-#   1 supernode + 3 compute nodes + 1 client
+# Runs the whole cluster: 3 compute nodes and one client.
 #
+# Normal run:
 #   docker compose up --build
+# compute0 starts the ring, compute1 and compute2 join through it, then the
+# client sends the shards, waits for training, averages the models, and prints
+# a validation error (around 0.29).
 #
-# The client pushes the training shards into the ring, waits for local
-# training, aggregates the models with FedAvg, and prints a validation error
+# Kill-a-node demo:
+#   ./demo/docker-chaos.sh
+#
+# Each node picks its own id from its hostname, so there is no separate
+# coordinator. The healthchecks below just wait until a node's port is open
+# before the next thing starts
 
-
-
-# Shared build, node-registry mount. The registry maps each compute port to
-# the docker service name that hosts it, so nodes can reach each other by name.
 x-app: &app
   build: .
-  volumes:
-    - ./docker/compute_nodes.txt:/app/compute_nodes.txt:ro
   networks:
     - chord
 
 services:
-  supernode:
-    <<: *app
-    hostname: supernode
-    command: python supernode_server.py 8000
-
   compute0:
     <<: *app
     hostname: compute0
-    # small delay so the supernode is listening before we try to join;
-    # concurrent joins are additionally handled by retry-on-busy in the node.
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9000"
-    depends_on: [supernode]
+    command: python compute_server.py compute0 9000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 9000), 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   compute1:
     <<: *app
     hostname: compute1
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9001"
-    depends_on: [supernode]
+    command: python compute_server.py compute1 9001 compute0 9000
+    depends_on:
+      compute0:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 9001), 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   compute2:
     <<: *app
     hostname: compute2
-    command: sh -c "sleep 4 && python compute_server.py supernode 8000 9002"
-    depends_on: [supernode]
+    command: python compute_server.py compute2 9002 compute0 9000
+    depends_on:
+      compute0:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 9002), 1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   client:
     <<: *app
-    command: sh -c "sleep 12 && python client.py supernode 8000"
-    depends_on: [compute0, compute1, compute2]
+    command: python client.py compute0 9000 compute1 9001 compute2 9002
+    depends_on:
+      compute0:
+        condition: service_healthy
+      compute1:
+        condition: service_healthy
+      compute2:
+        condition: service_healthy
 
 networks:
   chord:

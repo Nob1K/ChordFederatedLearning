@@ -1,30 +1,30 @@
-"""Shared configuration for the Chord ring and the compute cluster.
+"""Shared config for the chord ring and the compute cluster.
 
-Both the supernode and the compute nodes import these constants so the
-identifier space is defined in exactly one place.
+Imported by every compute node and the client so the id space and the MLP
+hyperparameters are defined in one place.
 """
 
-# Number of bits in the Chord identifier space
-M = 4
+# bits in the chord id space. nodes hash "host:port" into [0, RING_SIZE), so a
+# big space (2**16 slots) keeps id collisions unlikely
+M = 16
 RING_SIZE = 2 ** M
 
 # Number of finger-table entries maintained by each node
 FINGER_TABLE_SIZE = M
 
-# Maximum number of compute nodes the supernode will admit into the ring.
-# This is a capacity limit on the cluster, distinct from the ring size above,
-# and must satisfy MAX_NODES <= RING_SIZE
-MAX_NODES = 10
+# Number of successors each node tracks (not just the immediate one). If a
+# node's successor dies, it fails over to the next entry in this list. Also for replication: a trained model is copied to
+# this many successors.
+SUCCESSOR_LIST_SIZE = 3
 
-# ---------------------------------------------------------------------------
-# MLP hyperparameters
-#
-# These are shared by every compute node (which trains local models) and the
-# client (which allocates the shared model it aggregates into). NUM_CLASSES and
-# HIDDEN_UNITS in particular MUST match across all of them, otherwise the weight
-# matrices won't have compatible shapes for FedAvg.
-# ---------------------------------------------------------------------------
-NUM_CLASSES = 26 
+# ring-maintenance and RPC timeout config (sec)
+STABILIZE_INTERVAL = 1.0
+RPC_TIMEOUT = 2.0
+
+# MLP hyperparameters. shared by the nodes (local training) and the client
+# (the model it aggregates into). NUM_CLASSES and HIDDEN_UNITS must match
+# across all of them or the weight matrices won't line up for FedAvg.
+NUM_CLASSES = 26
 HIDDEN_UNITS = 100    # hidden-layer width
 LEARNING_RATE = 0.03
 TRAIN_EPOCHS = 1000
